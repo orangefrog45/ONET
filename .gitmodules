@@ -1,0 +1,3 @@
+[submodule "Chat-Core/extern/asio"]
+	path = Chat-Core/extern/asio
+	url = https://github.com/chriskohlhoff/asio
