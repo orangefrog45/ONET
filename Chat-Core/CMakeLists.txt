@@ -4,7 +4,7 @@ project(CHAT_CORE)
 
 add_executable(CHAT_CORE
 src/main.cpp
- "headers/Listener.h"  "headers/tsQueue.h")
+ "headers/ONET.h"  "headers/tsQueue.h" "headers/tsVector.h")
 
 target_include_directories(CHAT_CORE PUBLIC 
 headers
