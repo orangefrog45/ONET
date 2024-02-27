@@ -1,6 +1,7 @@
 #pragma once
 #include <asio.hpp>
 #include <string>
+#include "CRC.h"
 #include "tsQueue.h"
 #include "tsVector.h"
 #include <iostream>
@@ -13,6 +14,9 @@ namespace ONET {
 
 #define ONET_UDP_PORT 1235
 #define ONET_TCP_PORT 1234
+
+// Prevent fragmentation by enforcing a maximum transmission size (required to handle corrupted packets)
+#define ONET_MAX_DATAGRAM_SIZE_BYTES 508
 
 	class NetworkManager {
 	public:
@@ -73,6 +77,8 @@ namespace ONET {
 	template<typename MsgTypeEnum>
 	struct MessageHeader {
 		uint64_t size;
+		uint32_t body_checksum;
+		uint32_t size_checksum;
 		MsgTypeEnum message_type;
 
 		typedef MsgTypeEnum enum_type;
@@ -85,6 +91,7 @@ namespace ONET {
 		}
 
 		uint64_t connection_id;
+		float time_sent;
 	};
 
 
@@ -301,6 +308,8 @@ namespace ONET {
 		}
 
 		void SendMsg(Message<MsgHeaderType>& msg) {
+			msg.header.body_checksum = CRC::Calculate(msg.content.data(), msg.content.size(), CRC::CRC_32());
+			msg.header.size_checksum = CRC::Calculate(&msg.header.size, sizeof(uint64_t), CRC::CRC_32());
 			asio::post(NetworkManager::GetIO(),
 				[this, msg]() mutable {
 					bool currently_writing_msg = !m_outgoing_msg_queue.empty();
@@ -359,10 +368,15 @@ namespace ONET {
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
 						m_current_bytes_read += length;
-
 						if (m_current_bytes_read == m_temp_receiving_message.header.size) {
-							this->incoming_msg_queue.push_back(m_temp_receiving_message);
-							if (this->MessageReceiveCallback) this->MessageReceiveCallback();
+
+
+							uint32_t body_checksum = CRC::Calculate(m_temp_receiving_message.content.data(), m_temp_receiving_message.content.size(), CRC::CRC_32());
+							if (m_temp_receiving_message.header.body_checksum == body_checksum) {
+								this->incoming_msg_queue.push_back(m_temp_receiving_message);
+								if (this->MessageReceiveCallback) this->MessageReceiveCallback();
+							}
+
 							m_current_bytes_read = 0;
 							ReadHeader();
 						}
@@ -372,6 +386,7 @@ namespace ONET {
 
 					}
 					else {
+						m_current_bytes_read = 0;
 						ONET_HANDLE_ERR(ec);
 					}
 				}
@@ -380,27 +395,54 @@ namespace ONET {
 		}
 
 		// ASYNC
+		// This reads an entire datagram and discards it to clear corrupted packets, then continues waiting for headers as normal
+		void DiscardCorruptedBody() {
+			m_temp_receiving_message.content.resize(ONET_MAX_DATAGRAM_SIZE_BYTES);
+
+			m_socket->async_receive_from(asio::buffer(m_temp_receiving_message.content.data(), ONET_MAX_DATAGRAM_SIZE_BYTES), m_endpoint,
+				[this](std::error_code ec, std::size_t length) {
+					if (!ec) {
+						// Do nothing, discard and go back to waiting for headers.
+							ReadHeader();
+						}
+						else {
+							ONET_HANDLE_ERR(ec);
+						}
+				}
+			);
+		}
+
+		// ASYNC
 		void ReadHeader() {
 			m_socket->async_receive_from(asio::buffer(&m_temp_receiving_message.header, sizeof(MsgHeaderType)), m_endpoint,
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
 						m_current_bytes_read += length;
+
 						if (m_current_bytes_read == sizeof(MsgHeaderType)) {
 							m_current_bytes_read = 0;
-							if (m_temp_receiving_message.header.size > 0) {
-								m_temp_receiving_message.content.resize(m_temp_receiving_message.header.size);
-								ReadBody();
+							if (m_temp_receiving_message.header.size > ONET_MAX_DATAGRAM_SIZE_BYTES || m_temp_receiving_message.header.size_checksum != CRC::Calculate(&m_temp_receiving_message.header.size, sizeof(uint64_t), CRC::CRC_32())) {
+								std::cout << "UDP corruption detected, discarding message\n" << std::flush;
+								DiscardCorruptedBody();
 							}
 							else {
-								this->incoming_msg_queue.push_back(m_temp_receiving_message);
-								ReadHeader();
+								if (m_temp_receiving_message.header.size > 0) {
+									m_temp_receiving_message.content.resize(m_temp_receiving_message.header.size);
+									ReadBody();
+								}
+								else {
+									this->incoming_msg_queue.push_back(m_temp_receiving_message);
+									ReadHeader();
+								}
 							}
+
 						}
 						else {
 							ReadHeader();
 						}
 					}
 					else {
+						m_current_bytes_read = 0;
 						ONET_HANDLE_ERR(ec);
 					}
 				}
@@ -520,7 +562,18 @@ namespace ONET {
 			m_acceptor->async_accept(new_socket->GetSocket(), std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, new_socket));
 		}
 
-		void BroadcastMessage(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
+		void BroadcastMessageTCP(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
+			std::scoped_lock l(connection_mux);
+
+			for (auto& connection : connections.GetVector()) {
+				if (connection.connection_id == connection_id_to_ignore)
+					continue;
+
+				connection.tcp->SendMsg(msg);
+			}
+		}
+
+		void BroadcastMessageUDP(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
 			std::scoped_lock l(connection_mux);
 
 			for (auto& connection : connections.GetVector()) {

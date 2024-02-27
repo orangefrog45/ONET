@@ -58,6 +58,10 @@ namespace ONET {
 			m_queue_mux.unlock();
 		}
 
+		std::deque<T>& GetQueue() {
+			return m_queue;
+		}
+
 	private:
 		std::recursive_mutex m_queue_mux;
 		std::deque<T> m_queue;

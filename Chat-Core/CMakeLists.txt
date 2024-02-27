@@ -9,4 +9,5 @@ src/main.cpp
 target_include_directories(CHAT_CORE PUBLIC 
 headers
 extern/asio/asio/include
+extern/crc/inc
 )

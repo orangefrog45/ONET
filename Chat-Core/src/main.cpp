@@ -13,11 +13,10 @@ void ProcessMessages(T& net) {
 	size_t size = net.incoming_msg_queue.size();
 	if (size > 0) {
 		auto msg = net.incoming_msg_queue.pop_back();
-		std::cout << msg.ContentAsString() << "\n";
 
 		// Server sends message to other clients
-		if constexpr (std::is_same_v<T, Server<MessageType>>) {
-			net.BroadcastMessage(msg);
+		if constexpr (std::is_same_v<T, Server<ClientServerMessageHeader<MessageType>>>) {
+			net.BroadcastMessageUDP(msg);
 		}
 
 	}
@@ -42,14 +41,10 @@ int main() {
 		if (std::tolower(s[0]) == 'c') {
 			client = std::make_unique<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>>();
 			bool res = client->connection_tcp.ConnectTo("191.101.59.98", ONET_TCP_PORT);
-			try {
-				client->connection_udp.SetEndpoint("191.101.59.98", ONET_UDP_PORT);
-				client->connection_udp.Open(ONET_UDP_PORT);
-				client->connection_udp.ReadHeader();
-			}
-			catch (std::exception& e) {
-				std::cout << "ERR: " << e.what() << "\n";
-			}
+
+			client->connection_udp.SetEndpoint("191.101.59.98", ONET_UDP_PORT);
+			client->connection_udp.Open(ONET_UDP_PORT);
+			client->connection_udp.ReadHeader();
 
 			if (!res)
 				std::cout << "Connection failed\n";
