@@ -51,7 +51,7 @@ namespace ONET {
 		}
 
 		void Lock() {
-			m_queue_mux.try_lock();
+			m_queue_mux.lock();
 		}
 
 		void Unlock() {

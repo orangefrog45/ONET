@@ -82,7 +82,7 @@ int main() {
 				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::STRING };
 
 				if (server)
-					server->BroadcastMessage(msg);
+					server->BroadcastMessageUDP(msg);
 				else
 					client->connection_udp.SendMsg(msg);
 			}

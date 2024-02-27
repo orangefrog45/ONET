@@ -78,7 +78,6 @@ namespace ONET {
 	struct MessageHeader {
 		uint64_t size;
 		uint32_t body_checksum;
-		uint32_t size_checksum;
 		MsgTypeEnum message_type;
 
 		typedef MsgTypeEnum enum_type;
@@ -309,7 +308,6 @@ namespace ONET {
 
 		void SendMsg(Message<MsgHeaderType>& msg) {
 			msg.header.body_checksum = CRC::Calculate(msg.content.data(), msg.content.size(), CRC::CRC_32());
-			msg.header.size_checksum = CRC::Calculate(&msg.header.size, sizeof(uint64_t), CRC::CRC_32());
 			asio::post(NetworkManager::GetIO(),
 				[this, msg]() mutable {
 					bool currently_writing_msg = !m_outgoing_msg_queue.empty();
@@ -421,7 +419,7 @@ namespace ONET {
 
 						if (m_current_bytes_read == sizeof(MsgHeaderType)) {
 							m_current_bytes_read = 0;
-							if (m_temp_receiving_message.header.size > ONET_MAX_DATAGRAM_SIZE_BYTES || m_temp_receiving_message.header.size_checksum != CRC::Calculate(&m_temp_receiving_message.header.size, sizeof(uint64_t), CRC::CRC_32())) {
+							if (m_temp_receiving_message.header.size > ONET_MAX_DATAGRAM_SIZE_BYTES) {
 								std::cout << "UDP corruption detected, discarding message\n" << std::flush;
 								DiscardCorruptedBody();
 							}
