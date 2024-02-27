@@ -1,7 +1,7 @@
 #include <iostream>
-#include <asio.hpp>
 #include "ONET.h"
 
+using namespace ONET;
 
 template<typename T>
 concept NetType = requires(T t) {
@@ -13,37 +13,44 @@ void ProcessMessages(T& net) {
 	size_t size = net.incoming_msg_queue.size();
 	if (size > 0) {
 		auto msg = net.incoming_msg_queue.pop_back();
-		std::string s_content;
+		std::cout << msg.ContentAsString() << "\n";
 
-		for (auto byte : msg.content) {
-			s_content.push_back(static_cast<char>(byte));
+		// Server sends message to other clients
+		if constexpr (std::is_same_v<T, Server<MessageType>>) {
+			net.BroadcastMessage(msg);
 		}
-		std::cout << "MESSAGE: " << s_content << "\n";
-		s_content.clear();
+
 	}
 }
 
 
 int main() {
-
 	ONET::NetworkManager::SetErrorCallback([](asio::error_code ec, unsigned err_line) {
 		std::cout << "Asio error: '" << ec.message() << "' at line " << err_line << "\n";
 		});
-	std::unique_ptr<ONET::ClientInterface<ONET::MessageType>> client;
-	std::unique_ptr<ONET::Server<ONET::MessageType>> server;
+
+	std::unique_ptr<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>> client;
+	std::unique_ptr<ONET::Server<ClientServerMessageHeader<MessageType>>> server;
 
 	std::string s;
-	std::cout << "Client or host?: ";
+	std::cout << "Client or server?: ";
 
 	std::getline(std::cin, s);
 
 
 	if (!s.empty()) {
 		if (std::tolower(s[0]) == 'c') {
-			client = std::make_unique<ONET::ClientInterface<ONET::MessageType>>();
-			bool res = client->connection.ConnectTo("191.101.59.98", 1234);
+			client = std::make_unique<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>>();
+			bool res = client->connection_tcp.ConnectTo("191.101.59.98", ONET_TCP_PORT);
+			try {
+				client->connection_udp.SetEndpoint("191.101.59.98", ONET_UDP_PORT);
+				client->connection_udp.Open(ONET_UDP_PORT);
+				client->connection_udp.ReadHeader();
+			}
+			catch (std::exception& e) {
+				std::cout << "ERR: " << e.what() << "\n";
+			}
 
-			//bool res = net.connection.ConnectTo("90.243.42.172", 1234);
 			if (!res)
 				std::cout << "Connection failed\n";
 			else
@@ -52,10 +59,9 @@ int main() {
 			}
 
 		}
-		else if (std::tolower(s[0] == 'h')) {
-			std::cout << "h hit";
-			server = std::make_unique<ONET::Server<ONET::MessageType>>();
-			server->OpenToConnections(1234);
+		else if (std::tolower(s[0] == 's')) {
+			server = std::make_unique<ONET::Server<ClientServerMessageHeader<MessageType>>>();
+			server->OpenToConnections(ONET_TCP_PORT);
 		}
 		else {
 			goto error;
@@ -78,16 +84,12 @@ int main() {
 				std::getline(std::cin, data);
 
 				data = data + "\n";
-				ONET::Message<ONET::MessageType> msg;
-				for (int i = 0; i < data.size(); i++) {
-					msg.content.push_back(static_cast<std::byte>(data[i]));
-				}
-				msg.header.size = data.size();
+				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::STRING };
 
 				if (server)
 					server->BroadcastMessage(msg);
 				else
-					client->connection.SendMsg(msg);
+					client->connection_udp.SendMsg(msg);
 			}
 		}
 	);
@@ -96,8 +98,10 @@ int main() {
 	while (true) {
 		if (client)
 			ProcessMessages(*client);
-		else 
+		else {
+			server->CheckConnectionsAlive();
 			ProcessMessages(*server);
+		}
 	}
 
 	using namespace std::chrono_literals;

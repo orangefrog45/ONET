@@ -47,7 +47,7 @@
       "configurationType": "RelWithDebInfo",
       "cmakeExecutable": "cmake",
       "remoteCopySourcesExclusionList": [ ".vs", ".git", "out" ],
-      "cmakeCommandArgs": "",
+      "cmakeCommandArgs": "-DCMAKE_CXX_STANDARD=20",
       "buildCommandArgs": "",
       "ctestCommandArgs": "",
       "inheritEnvironments": [ "linux_x86" ],

@@ -3,12 +3,16 @@
 #include <string>
 #include "tsQueue.h"
 #include "tsVector.h"
+#include <iostream>
 
 namespace ONET {
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 #define CONCAT_IMPL(x, y) x##y
 #define FUNC_NAME __FUNCTION__ 
 #define ONET_HANDLE_ERR(x) if (auto cb = NetworkManager::GetErrorCallback()) cb(x, __LINE__)
+
+#define ONET_UDP_PORT 1235
+#define ONET_TCP_PORT 1234
 
 	class NetworkManager {
 	public:
@@ -49,7 +53,7 @@ namespace ONET {
 			m_net_thread = std::thread([&]() { m_io.run(); });
 		}
 
-		bool I_Shutdown() {
+		void I_Shutdown() {
 			m_io.stop();
 			if (m_net_thread.joinable()) m_net_thread.join();
 		}
@@ -61,25 +65,43 @@ namespace ONET {
 
 	};
 
-
+	enum class MessageType {
+		HANDSHAKE = 0,
+		STRING = 1,
+	};
 
 	template<typename MsgTypeEnum>
 	struct MessageHeader {
 		uint64_t size;
 		MsgTypeEnum message_type;
+
+		typedef MsgTypeEnum enum_type;
 	};
 
 	template<typename MsgTypeEnum>
+	struct ClientServerMessageHeader : public MessageHeader<MsgTypeEnum> {
+		ClientServerMessageHeader() {
+			static_assert((uint32_t)MsgTypeEnum::HANDSHAKE == 0, "MsgTypeEnum must have member 'HANDSHAKE' equal to 0");
+		}
+
+		uint64_t connection_id;
+	};
+
+
+	template<typename MsgHeaderType>
 	struct Message {
-		Message() = default;
-		Message(const std::string& msg_content, MsgTypeEnum msg_type) {
+		Message() {
+		}
+
+
+		Message(const std::string& msg_content, MsgHeaderType::enum_type msg_type) {
 			content.resize(msg_content.size());
 			std::ranges::copy(msg_content, reinterpret_cast<char*>(content.data()));
 			header.size = content.size();
 			header.message_type = msg_type;
 			}
 
-		Message(MsgTypeEnum msg_type) {
+		Message(MsgHeaderType::enum_type msg_type) {
 			header.message_type = msg_type;
 		}
 
@@ -88,23 +110,38 @@ namespace ONET {
 			return {reinterpret_cast<const char*>(content.data()), content.size()};
 		}
 
-		MessageHeader<MsgTypeEnum> header;
+		MsgHeaderType header;
 		std::vector<std::byte> content;
 	};
 
-	template<typename MsgTypeEnum>
-	class SocketConnection {
+
+	template<typename MsgHeaderType>
+	class SocketConnectionBase {
 	public:
-		SocketConnection(tsQueue<Message<MsgTypeEnum>>& incoming_queue) : incoming_msg_queue(incoming_queue) {
-			m_socket = std::make_unique<asio::ip::tcp::socket>(NetworkManager::GetIO());
+		SocketConnectionBase(tsQueue<Message<MsgHeaderType>>& incoming_queue, std::function<void()> _MessageReceiveCallback = nullptr) : incoming_msg_queue(incoming_queue), MessageReceiveCallback(_MessageReceiveCallback) {
+			static_assert(std::derived_from<MsgHeaderType, MessageHeader<typename MsgHeaderType::enum_type>>, "MsgHeaderType must be derived from MessageHeader class");
 		}
+
+		tsQueue<Message<MsgHeaderType>>& incoming_msg_queue;
+
+	protected:
+		std::function<void()> MessageReceiveCallback = nullptr;
+	};
+
+
+	template<typename MsgHeaderType>
+	class SocketConnectionTCP : public SocketConnectionBase<MsgHeaderType> {
+	public:
+		SocketConnectionTCP(tsQueue<Message<MsgHeaderType>>& incoming_queue, std::function<void()> _MessageReceiveCallback = nullptr) : SocketConnectionBase<MsgHeaderType>(incoming_queue, _MessageReceiveCallback) {
+			m_socket = std::make_unique<asio::ip::tcp::socket>(NetworkManager::GetIO());
+		};
 
 		bool ConnectTo(std::string ipv4, unsigned port) {
 			asio::error_code ec;
 
-			asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ipv4), port);
+			m_endpoint = asio::ip::tcp::endpoint(asio::ip::make_address(ipv4), port);
 
-			m_socket->connect(endpoint, ec);
+			m_socket->connect(m_endpoint, ec);
 			if (ec) {
 				ONET_HANDLE_ERR(ec);
 				return false;
@@ -131,9 +168,9 @@ namespace ONET {
 			return m_socket->is_open();
 		}
 
-		void SendMsg(const Message<MsgTypeEnum>& msg) {
+		void SendMsg(Message<MsgHeaderType>& msg) {
 			asio::post(NetworkManager::GetIO(),
-				[this, msg] {
+				[this, msg]() mutable {
 					bool currently_writing_msg = !m_outgoing_msg_queue.empty();
 					m_outgoing_msg_queue.push_front(msg);
 					if (!currently_writing_msg) {
@@ -162,7 +199,7 @@ namespace ONET {
 
 		// ASYNC
 		void WriteHeader() {
-			asio::async_write(*m_socket, asio::buffer(&m_outgoing_msg_queue.front().header, sizeof(MessageHeader<MsgTypeEnum>)),
+			asio::async_write(*m_socket, asio::buffer(&m_outgoing_msg_queue.front().header, sizeof(MsgHeaderType)),
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
 						if (m_outgoing_msg_queue.front().content.size() > 0) {
@@ -187,7 +224,10 @@ namespace ONET {
 			asio::async_read(*m_socket, asio::buffer(m_temp_receiving_message.content.data(), m_temp_receiving_message.content.size()),
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
-						incoming_msg_queue.push_back(m_temp_receiving_message);
+						this->incoming_msg_queue.push_back(m_temp_receiving_message);
+
+						if (this->MessageReceiveCallback) this->MessageReceiveCallback();
+
 						ReadHeader();
 					}
 					else {
@@ -200,7 +240,7 @@ namespace ONET {
 		
 		// ASYNC
 		void ReadHeader() {
-			asio::async_read(*m_socket, asio::buffer(&m_temp_receiving_message.header, sizeof(MessageHeader<MsgTypeEnum>)),
+			asio::async_read(*m_socket, asio::buffer(&m_temp_receiving_message.header, sizeof(MsgHeaderType)),
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
 						if (m_temp_receiving_message.header.size > 0) {
@@ -208,12 +248,17 @@ namespace ONET {
 							ReadBody();
 						}
 						else {
-							incoming_msg_queue.push_back(m_temp_receiving_message);
+							this->incoming_msg_queue.push_back(m_temp_receiving_message);
 							ReadHeader();
 						}
 					}
 					else {
-						ONET_HANDLE_ERR(ec);
+						if (ec == asio::error::eof || ec == asio::error::connection_reset) {
+							Disconnect();
+						}
+						else {
+							ONET_HANDLE_ERR(ec);
+						}
 					}
 				}
 			);
@@ -223,85 +268,276 @@ namespace ONET {
 			return *m_socket;
 		}
 
-		tsQueue<Message<MsgTypeEnum>>& incoming_msg_queue;
+		asio::ip::tcp::endpoint GetEndpoint() {
+			return m_endpoint;
+		}
 
-		std::unique_ptr<asio::ip::tcp::socket> m_socket;
+
 	private:
-		tsQueue<Message<MsgTypeEnum>> m_outgoing_msg_queue;
+		std::unique_ptr<asio::ip::tcp::socket> m_socket;
 
-		Message<MsgTypeEnum> m_temp_receiving_message;
+		asio::ip::tcp::endpoint m_endpoint;
+
+		tsQueue<Message<MsgHeaderType>> m_outgoing_msg_queue;
+
+		Message<MsgHeaderType> m_temp_receiving_message;
+	};
+
+	template<typename MsgHeaderType>
+	class SocketConnectionUDP : public SocketConnectionBase<MsgHeaderType> {
+	public:
+		SocketConnectionUDP(tsQueue<Message<MsgHeaderType>>& incoming_queue, std::function<void()> _MessageReceiveCallback = nullptr) : SocketConnectionBase<MsgHeaderType>(incoming_queue, _MessageReceiveCallback) {
+			m_socket = std::make_unique<asio::ip::udp::socket>(NetworkManager::GetIO());
+		}
+
+		void Open(unsigned port) {
+			auto ep = asio::ip::udp::endpoint(asio::ip::udp::v4(), port);
+			m_socket->open(ep.protocol());
+			m_socket->bind(ep);
+		}
+
+		void SetEndpoint(const std::string& ip, unsigned port) {
+			m_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(ip), port);
+		}
+
+		void SendMsg(Message<MsgHeaderType>& msg) {
+			asio::post(NetworkManager::GetIO(),
+				[this, msg]() mutable {
+					bool currently_writing_msg = !m_outgoing_msg_queue.empty();
+					m_outgoing_msg_queue.push_front(msg);
+					if (!currently_writing_msg) {
+						WriteHeader();
+					}
+				}
+			);
+		}
+
+		//ASYNC
+		void WriteBody() {
+			m_socket->async_send_to(asio::buffer(m_outgoing_msg_queue.front().content.data(), m_outgoing_msg_queue.front().content.size()), m_endpoint,
+				[this](std::error_code ec, std::size_t length) {
+					if (!ec) {
+						m_outgoing_msg_queue.pop_front();
+
+						if (!m_outgoing_msg_queue.empty())
+							WriteHeader();
+					}
+					else {
+						ONET_HANDLE_ERR(ec);
+					}
+				}
+			);
+
+		}
+
+		// ASYNC
+		void WriteHeader() {
+			m_socket->async_send_to(asio::buffer(&m_outgoing_msg_queue.front().header, sizeof(MsgHeaderType)), m_endpoint,
+				[this](std::error_code ec, std::size_t length) {
+					if (!ec) {
+						if (m_outgoing_msg_queue.front().content.size() > 0) {
+							WriteBody();
+						}
+						else {
+							m_outgoing_msg_queue.pop_front();
+
+							if (!m_outgoing_msg_queue.empty())
+								WriteHeader();
+						}
+					}
+					else {
+						ONET_HANDLE_ERR(ec);
+					}
+				}
+			);
+
+		}
+
+		// ASYNC
+		void ReadBody() {
+			m_socket->async_receive_from(asio::buffer(m_temp_receiving_message.content.data(), m_temp_receiving_message.content.size()), m_endpoint, 
+				[this](std::error_code ec, std::size_t length) {
+					if (!ec) {
+						m_current_bytes_read += length;
+
+						if (m_current_bytes_read == m_temp_receiving_message.header.size) {
+							this->incoming_msg_queue.push_back(m_temp_receiving_message);
+							if (this->MessageReceiveCallback) this->MessageReceiveCallback();
+							m_current_bytes_read = 0;
+							ReadHeader();
+						}
+						else {
+							ReadBody();
+						}
+
+					}
+					else {
+						ONET_HANDLE_ERR(ec);
+					}
+				}
+			);
+
+		}
+
+		// ASYNC
+		void ReadHeader() {
+			m_socket->async_receive_from(asio::buffer(&m_temp_receiving_message.header, sizeof(MsgHeaderType)), m_endpoint,
+				[this](std::error_code ec, std::size_t length) {
+					if (!ec) {
+						m_current_bytes_read += length;
+						if (m_current_bytes_read == sizeof(MsgHeaderType)) {
+							m_current_bytes_read = 0;
+							if (m_temp_receiving_message.header.size > 0) {
+								m_temp_receiving_message.content.resize(m_temp_receiving_message.header.size);
+								ReadBody();
+							}
+							else {
+								this->incoming_msg_queue.push_back(m_temp_receiving_message);
+								ReadHeader();
+							}
+						}
+						else {
+							ReadHeader();
+						}
+					}
+					else {
+						ONET_HANDLE_ERR(ec);
+					}
+				}
+			);
+			
+		}
+
+		auto& GetSocket() {
+			return *m_socket;
+		}
+
+	private:
+		std::unique_ptr<asio::ip::udp::socket> m_socket;
+
+		asio::ip::udp::endpoint m_endpoint;
+
+		size_t m_current_bytes_read = 0;
+
+		tsQueue<Message<MsgHeaderType>> m_outgoing_msg_queue;
+
+		Message<MsgHeaderType> m_temp_receiving_message;
 
 	};
 
-	enum class MessageType {
-		PING
-	};
 
-
-	template<typename MsgTypeEnum>
+	template<typename MsgHeaderType>
 	class ClientInterface {
 	public:
+		ClientInterface() {
+			static_assert(std::derived_from<MsgHeaderType, ClientServerMessageHeader<typename MsgHeaderType::enum_type>>, "MsgHeaderType must be derived from ClientServerMessageHeader");
+		}
+
 		void OpenToConnections(unsigned port) {
 			m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(NetworkManager::GetIO(), asio::ip::tcp::endpoint(asio::ip::tcp::v6(), port));
-			m_acceptor->async_accept(connection.GetSocket(), [this](std::error_code ec) {std::cout << "Connection accepted\n"; connection.ReadHeader(); });
+			m_acceptor->async_accept(connection_tcp.GetSocket(), [this](std::error_code ec) {std::cout << "Connection accepted\n"; connection_tcp.ReadHeader(); });
 		}
 
 		void Disconnect() {
 			if (m_acceptor->is_open())
 				m_acceptor->close();
 
-			connection.Disconnect();
+			connection_tcp.Disconnect();
 		}
 
-		tsQueue<Message<MsgTypeEnum>> incoming_msg_queue;
-		SocketConnection<MsgTypeEnum> connection{ incoming_msg_queue };
+		uint64_t GetConnectionID() {
+			return m_connection_id;
+		}
+
+		tsQueue<Message<MsgHeaderType>> incoming_msg_queue;
+		SocketConnectionTCP<MsgHeaderType> connection_tcp{ incoming_msg_queue, std::bind(&ClientInterface::OnReceiveMessage, this)};
+		SocketConnectionUDP<MsgHeaderType> connection_udp{ incoming_msg_queue, std::bind(&ClientInterface::OnReceiveMessage, this) };
 	private:
+		void OnReceiveMessage() {
+			incoming_msg_queue.Lock();
+			auto& msg = incoming_msg_queue.front();
+
+			if (msg.header.message_type == MsgHeaderType::enum_type::HANDSHAKE) {
+				// This is the initial handshake, server gives connection a unique ID, process and discard.
+				m_connection_id = *reinterpret_cast<uint64_t*>(msg.content.data());
+				std::cout << "ID RECEIVED: " << m_connection_id << "\n";
+				incoming_msg_queue.pop_front();
+			}
+			incoming_msg_queue.Unlock();
+		}
+
+		uint64_t m_connection_id = 0;
 		std::unique_ptr<asio::ip::tcp::acceptor> m_acceptor;
 	};
 
+	template<typename MsgHeaderType>
+	struct ServerConnection {
+		ServerConnection(std::shared_ptr<SocketConnectionTCP<MsgHeaderType>> _tcp, std::shared_ptr<SocketConnectionUDP<MsgHeaderType>> _udp, uint64_t _connection_id) : tcp(std::move(_tcp)), udp(std::move(_udp)), connection_id(_connection_id)  {};
+		std::shared_ptr<SocketConnectionTCP<MsgHeaderType>> tcp;
+		std::shared_ptr<SocketConnectionUDP<MsgHeaderType>> udp;
+		uint64_t connection_id;
+	};
 
-	template<typename MsgTypeEnum>
+	template<typename MsgHeaderType>
 	class Server {
 	public:
-		Server() = default;
+		Server() {
+			static_assert(std::derived_from<MsgHeaderType, ClientServerMessageHeader<typename MsgHeaderType::enum_type>>, "MsgHeaderType must be derived from ClientServerMessageHeader");
+		}
 
 		void OpenToConnections(unsigned port) {
 			m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(NetworkManager::GetIO(), asio::ip::tcp::endpoint(asio::ip::tcp::v6(), port));
-			auto socket = std::make_shared<SocketConnection<MsgTypeEnum>>(incoming_msg_queue);
+			
+			auto tcp_socket = std::make_shared<SocketConnectionTCP<MsgHeaderType>>(incoming_msg_queue);
 
-			m_acceptor->async_accept(*socket->m_socket, std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, socket));
-		
+			m_acceptor->async_accept(tcp_socket->GetSocket(), std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, tcp_socket));
 		}
 
-		void HandleConnectionRequest(const asio::error_code& ec, std::shared_ptr<SocketConnection<MsgTypeEnum>> socket) {
-			std::cout << "Connection accepted\n";
-			connections.push_back(socket);
-			socket->ReadHeader();
+		void HandleConnectionRequest(const asio::error_code& ec, std::shared_ptr<SocketConnectionTCP<MsgHeaderType>> tcp_socket) {
+			std::cout << "Connection accepted: " << "\n";
 
-			auto new_socket = std::make_shared<SocketConnection<MsgTypeEnum>>(incoming_msg_queue);
+			auto udp_socket = std::make_shared<SocketConnectionUDP<MsgHeaderType>>(incoming_msg_queue);
+			ServerConnection<MsgHeaderType> connection(tcp_socket, udp_socket, GenConnectionID());
+			auto tcp_endpoint = tcp_socket->GetEndpoint();
+			udp_socket->SetEndpoint(tcp_endpoint.address().to_string() , ONET_UDP_PORT);
+			udp_socket->Open(ONET_UDP_PORT);
 
-			//m_acceptor->async_accept(*socket->m_socket, std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, new_socket));
+			tcp_socket->ReadHeader();
+			udp_socket->ReadHeader();
+			connections.push_back(connection);
 
+			// Send initial handshake message to give connection a unique identifier.
+			Message<MsgHeaderType> msg;
+			msg.header.message_type = MsgHeaderType::enum_type::HANDSHAKE;
+			msg.content.resize(sizeof(uint64_t));
+			msg.header.size = msg.content.size();
+			std::memcpy(msg.content.data(), &connection.connection_id, sizeof(uint64_t));
+
+			tcp_socket->SendMsg(msg);
+
+			auto new_socket = std::make_shared<SocketConnectionTCP<MsgHeaderType>>(incoming_msg_queue);
+
+			m_acceptor->async_accept(new_socket->GetSocket(), std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, new_socket));
 		}
 
-		void BroadcastMessage(const Message<MsgTypeEnum> msg, std::shared_ptr<SocketConnection<MsgTypeEnum>> connection_to_ignore = nullptr) {
+		void BroadcastMessage(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
 			std::scoped_lock l(connection_mux);
 
 			for (auto& connection : connections.GetVector()) {
-				if (connection == connection_to_ignore)
+				if (connection.connection_id == connection_id_to_ignore)
 					continue;
 
-				connection->SendMsg(msg);
+				connection.udp->SendMsg(msg);
 			}
 
 		}
 
 		void CheckConnectionsAlive() {
 			std::scoped_lock l(connection_mux);
-			const auto& vec = connections.GetVector();
-
+			auto& vec = connections.GetVector();
+			
 			for (int i = 0; i < connections.size(); i++) {
-				if (!vec[i]->IsConnected()) {
+				if (!vec[i].tcp->IsConnected()) {
 					vec.erase(vec.begin() + i);
 					i--;
 				}
@@ -309,10 +545,23 @@ namespace ONET {
 			}
 		}
 
-		tsQueue<Message<MsgTypeEnum>> incoming_msg_queue;
+		tsQueue<Message<MsgHeaderType>> incoming_msg_queue;
 
-		tsVector<std::shared_ptr<SocketConnection<MsgTypeEnum>>> connections;
+		tsVector<ServerConnection<MsgHeaderType>> connections;
 	private:
+
+		uint64_t GenConnectionID() {
+			static uint64_t current_id = 1;
+
+			m_current_connection_id_mux.lock();
+			uint64_t id = current_id++;
+			m_current_connection_id_mux.unlock();
+
+			return id;
+		}
+
+		std::mutex m_current_connection_id_mux;
+
 		std::mutex connection_mux;
 
 		std::unique_ptr<asio::ip::tcp::acceptor> m_acceptor;
