@@ -1,5 +1,7 @@
 #include <iostream>
+#define ONET_DEBUG
 #include "ONET.h"
+#include <variant>
 
 using namespace ONET;
 
@@ -14,23 +16,24 @@ void ProcessMessages(T& net) {
 	if (size > 0) {
 		auto msg = net.incoming_msg_queue.pop_back();
 
+
 		// Server sends message to other clients
 		if constexpr (std::is_same_v<T, Server<ClientServerMessageHeader<MessageType>>>) {
-			net.BroadcastMessageUDP(msg);
+			net.BroadcastMessageUDP(msg, msg.header.connection_id);
 		}
+		std::cout << msg.ContentAsString();
 
 	}
 }
 
 
 int main() {
-	ONET::NetworkManager::SetErrorCallback([](asio::error_code ec, unsigned err_line) {
-		std::cout << "Asio error: '" << ec.message() << "' at line " << err_line << "\n";
+	ONET::NetworkManager::SetErrorCallback([](const asio::error_code& ec, const std::source_location& sl) {
+		std::cout << "Asio error: '" << ec.message() << "' at file " << sl.function_name() << " at line " << sl.line() << "\n";
 		});
 
 	std::unique_ptr<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>> client;
 	std::unique_ptr<ONET::Server<ClientServerMessageHeader<MessageType>>> server;
-
 	std::string s;
 	std::cout << "Client or server?: ";
 
@@ -40,11 +43,11 @@ int main() {
 	if (!s.empty()) {
 		if (std::tolower(s[0]) == 'c') {
 			client = std::make_unique<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>>();
-			bool res = client->connection_tcp.ConnectTo("191.101.59.98", ONET_TCP_PORT);
+			bool res = client->connection_tcp.ConnectTo("127.0.0.1", ONET_TCP_PORT);
 
-			client->connection_udp.SetEndpoint("191.101.59.98", ONET_UDP_PORT);
-			client->connection_udp.Open(ONET_UDP_PORT);
-			client->connection_udp.ReadHeader();
+			//client->connection_udp.SetEndpoint("127.0.0.1", ONET_UDP_PORT);
+			//client->connection_udp.Open(ONET_UDP_PORT);
+			//client->connection_tcp.ReadHeader();
 
 			if (!res)
 				std::cout << "Connection failed\n";
@@ -82,9 +85,11 @@ int main() {
 				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::STRING };
 
 				if (server)
-					server->BroadcastMessageUDP(msg);
-				else
-					client->connection_udp.SendMsg(msg);
+					server->BroadcastMessageTCP(msg);
+				else {
+					client->connection_tcp.SendMsg(msg);
+					//client->connection_udp.SendMsg(msg);
+				}
 			}
 		}
 	);
@@ -95,6 +100,7 @@ int main() {
 			ProcessMessages(*client);
 		else {
 			server->CheckConnectionsAlive();
+			server->OnUpdate();
 			ProcessMessages(*server);
 		}
 	}

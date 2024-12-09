@@ -50,20 +50,12 @@ namespace ONET {
 			return m_queue.empty();
 		}
 
-		void Lock() {
-			m_queue_mux.lock();
-		}
-
-		void Unlock() {
-			m_queue_mux.unlock();
-		}
-
 		std::deque<T>& GetQueue() {
 			return m_queue;
 		}
 
-	private:
 		std::recursive_mutex m_queue_mux;
+	private:
 		std::deque<T> m_queue;
 	};
 }
