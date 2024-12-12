@@ -19,9 +19,8 @@ void ProcessMessages(T& net) {
 
 		// Server sends message to other clients
 		if constexpr (std::is_same_v<T, Server<ClientServerMessageHeader<MessageType>>>) {
-			net.BroadcastMessageUDP(msg, msg.header.connection_id);
+			net.BroadcastMessageTCP(msg, msg.header.connection_id);
 		}
-		std::cout << msg.ContentAsString();
 
 	}
 }
@@ -82,7 +81,7 @@ int main() {
 				std::getline(std::cin, data);
 
 				data = data + "\n";
-				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::STRING };
+				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::DATA };
 
 				if (server)
 					server->BroadcastMessageTCP(msg);

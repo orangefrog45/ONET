@@ -38,12 +38,8 @@ namespace ONET {
 			return m_vec.empty();
 		}
 
-		void Lock() {
-			m_vec_mux.try_lock();
-		}
-
-		void Unlock() {
-			m_vec_mux.unlock();
+		std::recursive_mutex& GetMutex() {
+			return m_vec_mux;
 		}
 
 		// Not thread-safe unless locks are used with the calling thread

@@ -60,11 +60,17 @@ namespace ONET {
 		NetworkManager() = default;
 
 		void I_Init() {
-			asio::io_context::work idle_work{ m_io };
-			m_net_thread = std::jthread([&]() { m_io.run(); });
+			m_running = true;
+			m_net_thread = std::jthread([&]() { 
+				while (m_running) { 
+					asio::io_context::work idle_work{ m_io };
+					m_io.run(); 
+				} 
+			});
 		}
 
 		void I_Shutdown() {
+			m_running = false;
 			m_io.stop();
 			if (m_net_thread.joinable()) m_net_thread.join();
 		}
@@ -75,6 +81,7 @@ namespace ONET {
 
 		std::function<void(asio::error_code, std::source_location sl)> error_callback = nullptr;
 
+		bool m_running = false;
 		asio::io_context m_io;
 		std::jthread m_net_thread;
 
@@ -84,7 +91,7 @@ namespace ONET {
 		HANDSHAKE = 0,
 		REQUEST_CLIENTS_INFO = 1,
 		RESPONSE_CLIENTS_INFO = 2,
-		STRING = 3,
+		DATA = 3,
 	};
 
 	template<typename MsgTypeEnum>
@@ -597,7 +604,7 @@ namespace ONET {
 			std::shared_ptr< SocketConnectionUDP<MsgHeaderType>> udp_socket = nullptr;
 
 			auto tcp_endpoint = tcp_socket->GetEndpoint();
-			connections.Lock();
+			std::scoped_lock l(connections.GetMutex());
 			for (auto& connection : connections.GetVector()) {
 				if (connection.tcp->GetEndpoint().address() == tcp_endpoint.address()) {
 					std::cout << "Existing UDP socket found for address\n";
@@ -632,12 +639,10 @@ namespace ONET {
 			auto new_socket = std::make_shared<SocketConnectionTCP<MsgHeaderType>>(incoming_msg_queue);
 
 			m_acceptor->async_accept(new_socket->GetSocket(), std::bind(&Server::HandleConnectionRequest, this, std::placeholders::_1, new_socket));
-
-			connections.Unlock();
 		}
 
 		void BroadcastMessageTCP(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
-			std::scoped_lock l(connection_mux);
+			std::scoped_lock l(connections.GetMutex());
 
 			for (auto& connection : connections.GetVector()) {
 				if (connection.connection_id == connection_id_to_ignore)
@@ -648,7 +653,7 @@ namespace ONET {
 		}
 
 		void BroadcastMessageUDP(Message<MsgHeaderType>& msg, uint64_t connection_id_to_ignore = 0) {
-			std::scoped_lock l(connection_mux);
+			std::scoped_lock l(connections.GetMutex());
 
 			for (auto& connection : connections.GetVector()) {
 				if (connection.connection_id == connection_id_to_ignore)
@@ -660,13 +665,14 @@ namespace ONET {
 		}
 
 		void CheckConnectionsAlive() {
-			std::scoped_lock l(connection_mux);
+			std::scoped_lock l(connections.GetMutex());
 			auto& vec = connections.GetVector();
 			
 			for (int i = 0; i < connections.size(); i++) {
 				if (!vec[i].tcp->IsConnected()) {
 					std::cout << "Erasing connection\n";
 					vec[i].udp->Disconnect();
+					vec[i].tcp->Disconnect();
 					vec.erase(vec.begin() + i);
 					i--;
 				}
