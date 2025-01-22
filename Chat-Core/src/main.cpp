@@ -1,7 +1,5 @@
-#include <iostream>
-#define ONET_DEBUG
 #include "ONET.h"
-#include <variant>
+#include <chrono>
 
 using namespace ONET;
 
@@ -9,103 +7,70 @@ template<typename T>
 concept NetType = requires(T t) {
 	{ t.incoming_msg_queue };
 };
+enum class GameMessageType {
+	HANDSHAKE = 0,
+	REQUEST_CLIENTS_INFO = 1,
+	RESPONSE_CLIENTS_INFO = 2,
+	STRING = 3,
+	BLOCK_DATA,
+	CONNECTION_ALERT,
+	GAME_EVENT,
+	WEAPON_DATA,
+	CORE_BLOCK_EVENT,
+	PHYSICS_SYNC,
+};
 
-template<NetType T>
-void ProcessMessages(T& net) {
-	size_t size = net.incoming_msg_queue.size();
-	if (size > 0) {
-		auto msg = net.incoming_msg_queue.pop_back();
+unsigned g_total_udp_messages = 0;
 
+void ProcessMessages(Server<ClientServerMessageHeader<GameMessageType>>& net) {
+	size_t size_tcp = net.incoming_msg_queue_tcp.size();
+	if (size_tcp > 0) {
+		auto msg = net.incoming_msg_queue_tcp.pop_back();
 
 		// Server sends message to other clients
-		if constexpr (std::is_same_v<T, Server<ClientServerMessageHeader<MessageType>>>) {
-			net.BroadcastMessageTCP(msg, msg.header.connection_id);
-		}
-
+		net.BroadcastMessageTCP(msg, msg.header.connection_id);
 	}
+
+	size_t size_udp = net.incoming_msg_queue_udp.size();
+	g_total_udp_messages += size_udp;
+
+	net.incoming_msg_queue_udp.m_queue_mux.lock();
+	auto& udp_queue = net.incoming_msg_queue_udp.GetQueue();
+	for (auto& msg : udp_queue) {
+		net.BroadcastMessageUDP(msg, msg.header.connection_id);
+	}
+	udp_queue.clear();
+	net.incoming_msg_queue_udp.m_queue_mux.unlock();
 }
 
 
 int main() {
+	using namespace std::chrono_literals;
+
+	ONET::NetworkManager::Init();
 	ONET::NetworkManager::SetErrorCallback([](const asio::error_code& ec, const std::source_location& sl) {
 		std::cout << "Asio error: '" << ec.message() << "' at file " << sl.function_name() << " at line " << sl.line() << "\n";
 		});
 
-	std::unique_ptr<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>> client;
-	std::unique_ptr<ONET::Server<ClientServerMessageHeader<MessageType>>> server;
-	std::string s;
-	std::cout << "Client or server?: ";
+	ONET::Server<ClientServerMessageHeader<GameMessageType>> server{};
+	server.OpenToConnections(ONET_TCP_PORT);
 
-	std::getline(std::cin, s);
+	auto last_sync_time = std::chrono::high_resolution_clock::now();
 
-
-	if (!s.empty()) {
-		if (std::tolower(s[0]) == 'c') {
-			client = std::make_unique<ONET::ClientInterface<ClientServerMessageHeader<MessageType>>>();
-			bool res = client->connection_tcp.ConnectTo("127.0.0.1", ONET_TCP_PORT);
-
-			//client->connection_udp.SetEndpoint("127.0.0.1", ONET_UDP_PORT);
-			//client->connection_udp.Open(ONET_UDP_PORT);
-			//client->connection_tcp.ReadHeader();
-
-			if (!res)
-				std::cout << "Connection failed\n";
-			else
-			{
-				std::cout << "Connection succeeded\n";
-			}
-
-		}
-		else if (std::tolower(s[0] == 's')) {
-			server = std::make_unique<ONET::Server<ClientServerMessageHeader<MessageType>>>();
-			server->OpenToConnections(ONET_TCP_PORT);
-		}
-		else {
-			goto error;
-		}
-	}
-	else {
-	error:
-		std::cout << "Invalid input\n";
-	}
-	ONET::NetworkManager::Init();
-
-
-	// Thread that allows user to input and send messages
-	std::future<void> f;
-
-	f = std::async(std::launch::async,
-		[&] {
-			std::string data = ".";
-			while (!data.empty()) {
-				std::getline(std::cin, data);
-
-				data = data + "\n";
-				ONET::Message<ClientServerMessageHeader<MessageType>> msg{ data, ONET::MessageType::DATA };
-
-				if (server)
-					server->BroadcastMessageTCP(msg);
-				else {
-					client->connection_tcp.SendMsg(msg);
-					//client->connection_udp.SendMsg(msg);
-				}
-			}
-		}
-	);
-
-	// Main thread waits, listens for and prints received messages to the console
 	while (true) {
-		if (client)
-			ProcessMessages(*client);
-		else {
-			server->CheckConnectionsAlive();
-			server->OnUpdate();
-			ProcessMessages(*server);
-		}
-	}
+		server.CheckConnectionsAlive();
+		server.OnUpdate();
+		ProcessMessages(server);
 
-	using namespace std::chrono_literals;
-	std::this_thread::sleep_for(200000ms);
+		auto now = std::chrono::high_resolution_clock::now();
+
+		if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sync_time).count() > 1000.f) {
+			last_sync_time = now;
+			std::cout << g_total_udp_messages << "\n";
+			g_total_udp_messages = 0;
+		}
+
+	}
 
 	ONET::NetworkManager::Shutdown();
 }

@@ -38,7 +38,7 @@ namespace ONET {
 			return m_vec.empty();
 		}
 
-		std::recursive_mutex& GetMutex() {
+		std::mutex& GetMutex() {
 			return m_vec_mux;
 		}
 
@@ -48,7 +48,7 @@ namespace ONET {
 		}
 
 	private:
-		std::recursive_mutex m_vec_mux;
+		std::mutex m_vec_mux;
 		std::vector<T> m_vec;
 	};
 }
