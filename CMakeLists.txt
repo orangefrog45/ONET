@@ -5,9 +5,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(ONET)
 
-if(ONET_COMPILE_EXAMPLE_SERVER_APP)
 add_subdirectory(ONET)
-endif()
 
 set(ONET_INCLUDES
 ${CMAKE_CURRENT_LIST_DIR}/ONET/headers

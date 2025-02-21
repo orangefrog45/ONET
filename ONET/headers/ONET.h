@@ -14,7 +14,7 @@ namespace ONET {
 #define FUNC_NAME __FUNCTION__ 
 #define ONET_HANDLE_ERR(ec) NetworkManager::HandleError(ec);
 
-#define ONET_UDP_PORT_CLIENT 47357
+#define ONET_UDP_PORT_CLIENT 47386
 #define ONET_UDP_PORT_SERVER 47388
 #define ONET_TCP_PORT 47389
 
@@ -250,7 +250,7 @@ namespace ONET {
 				[=, this]() {
 					bool currently_writing_msg;
 					{
-						std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
+						std::scoped_lock l(m_outgoing_msg_queue.mux);
 						currently_writing_msg = !m_outgoing_msg_queue.GetQueue().empty();
 						m_outgoing_msg_queue.GetQueue().push_back(msg);
 					}
@@ -264,7 +264,7 @@ namespace ONET {
 
 		//ASYNC
 		void WriteBody() {
-			std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
+			std::scoped_lock l(m_outgoing_msg_queue.mux);
 			asio::async_write(*m_socket, asio::buffer(m_outgoing_msg_queue.GetQueue()[0].content.data(), m_outgoing_msg_queue.GetQueue()[0].content.size()),
 				[this](std::error_code ec, std::size_t s) {
 					if (!ec) {
@@ -282,7 +282,7 @@ namespace ONET {
 
 		// ASYNC
 		void WriteHeader() {
-			std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
+			std::scoped_lock l(m_outgoing_msg_queue.mux);
 			asio::async_write(*m_socket, asio::buffer(&m_outgoing_msg_queue.GetQueue()[0].header, sizeof(MsgHeaderType)),
 				[this](std::error_code ec, std::size_t) {
 					if (!ec) {
@@ -374,19 +374,26 @@ namespace ONET {
 			m_socket = std::make_unique<asio::ip::udp::socket>(NetworkManager::GetIO());
 		}
 
-		void Open(uint_least16_t port, const std::optional<std::string>& address = std::nullopt) {
+		void Open() {
 			m_socket->open(asio::ip::udp::v4());
+			m_socket->set_option(asio::socket_base::send_buffer_size(5'000'000));
+		}
+
+		void Bind(uint_least16_t port, const std::optional<std::string>& address = std::nullopt) {
 			if (address.has_value())
 				m_socket->bind(asio::ip::udp::endpoint{ asio::ip::make_address(address.value()), port });
 			else
 				m_socket->bind(asio::ip::udp::endpoint{ asio::ip::make_address("0.0.0.0"), port });
 
 			m_socket->set_option(asio::socket_base::receive_buffer_size(5'000'000));
-			m_socket->set_option(asio::socket_base::send_buffer_size(5'000'000));
 		}
 
 		void SetEndpoint(const std::string& ipv4, unsigned port) {
 			m_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(ipv4), port);
+		}
+
+		auto& GetEndpoint() {
+			return m_endpoint;
 		}
 
 		void SendMsg(MessageUDP<MsgHeaderType>& msg) {
@@ -397,7 +404,7 @@ namespace ONET {
 				[=, this]() {
 					bool currently_writing_msg;
 					{
-						std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
+						std::scoped_lock l(m_outgoing_msg_queue.mux);
 						currently_writing_msg = !m_outgoing_msg_queue.GetQueue().empty();
 						m_outgoing_msg_queue.GetQueue().push_back(msg);
 					}
@@ -412,10 +419,14 @@ namespace ONET {
 
 		// ASYNC
 		void WriteMessage() {
-			std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
+			std::scoped_lock l(m_outgoing_msg_queue.mux);
+			std::cout << m_endpoint.address() << " " << m_endpoint.port() << "\n";
+
 			m_socket->async_send_to(asio::buffer(&m_outgoing_msg_queue.GetQueue()[0], sizeof(MessageUDP<MsgHeaderType>)), m_endpoint,
 				[this](std::error_code ec, std::size_t size) {
 					if (!ec) {
+						std::cout << "UDP COMPLETED" << "\n";
+
 #ifdef ONET_DEBUG
 						std::cout << "Popping outgoing message\n";
 #endif
@@ -519,7 +530,7 @@ namespace ONET {
 			if (m_connection_id != 0)
 				return;
 
-			std::scoped_lock(incoming_msg_queue_tcp.m_queue_mux);
+			std::scoped_lock(incoming_msg_queue_tcp.mux);
 			if (!incoming_msg_queue_tcp.empty() && incoming_msg_queue_tcp.front().header.message_type == MsgHeaderType::enum_type::HANDSHAKE) {
 				auto msg = incoming_msg_queue_tcp.pop_front();
 				// This is the initial handshake, server gives connection a unique ID, process and discard.
@@ -552,7 +563,8 @@ namespace ONET {
 		}
 
 		void OpenToConnections(unsigned port) {
-			m_udp_receiver.Open(ONET_UDP_PORT_SERVER);
+			m_udp_receiver.Open();
+			m_udp_receiver.Bind(ONET_UDP_PORT_SERVER);
 			m_udp_receiver.ReadMessage();
 
 			m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(NetworkManager::GetIO(), asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));
@@ -563,7 +575,7 @@ namespace ONET {
 		}
 		
 		void OnUpdate() {
-			std::scoped_lock l(incoming_msg_queue_tcp.m_queue_mux);
+			std::scoped_lock l(incoming_msg_queue_tcp.mux);
 			bool pop = false;
 
 			// Check only TCP queue for these messages as they will always be sent via this protocol
@@ -598,22 +610,25 @@ namespace ONET {
 
 			unsigned endpoint_port = ONET_UDP_PORT_CLIENT;
 			unsigned server_port = ONET_UDP_PORT_SERVER;
-			for (auto& connection : connections.GetVector()) {
-				if (connection.tcp->IsConnected() && connection.tcp->GetRemoteEndpoint().address() == tcp_endpoint.address()) {
-					// This will only happen during multi-client testing on a single machine
-					// In a 2-client test setup, the second client to connect to the server should be listening to ONET_UDP_PORT_CLIENT - 1 instead
-					endpoint_port--;
-					server_port--;
-				}
-			}
+			//for (auto& connection : connections.GetVector()) {
+			//	if (connection.tcp->IsConnected() && connection.tcp->GetRemoteEndpoint().address() == tcp_endpoint.address()) {
+			//		// This will only happen during multi-client testing on a single machine
+			//		// In a 2-client test setup, the second client to connect to the server should be listening to ONET_UDP_PORT_CLIENT - 1 instead
+			//		endpoint_port--;
+			//		server_port--;
+			//	}
+			//}
 
 			std::shared_ptr<SocketConnectionUDP<MsgHeaderType>> udp_socket = std::make_shared<SocketConnectionUDP<MsgHeaderType>>(incoming_msg_queue_udp);
 			udp_socket->SetEndpoint(address_str, endpoint_port);
+
+			udp_socket->Open();
 			if (server_port != ONET_UDP_PORT_SERVER) {
-				udp_socket->Open(server_port);
+				std::cout << "Opened port " << server_port << "\n";
+				udp_socket->Bind(server_port);
+				udp_socket->ReadMessage();
 			}
 
-			udp_socket->ReadMessage();
 			tcp_socket->ReadHeader();
 
 			ServerConnection<MsgHeaderType> connection(tcp_socket, udp_socket, GenConnectionID());
