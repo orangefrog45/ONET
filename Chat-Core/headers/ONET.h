@@ -116,7 +116,7 @@ namespace ONET {
 
 	template<typename MsgTypeEnum>
 	struct MessageHeader {
-		uint16_t size=0;
+		size_t size=0;
 		uint16_t checksum;
 		MsgTypeEnum message_type;
 
@@ -247,7 +247,7 @@ namespace ONET {
 			msg.header.size = msg.content.size();
 
 			asio::post(NetworkManager::GetIO(),
-				[this, msg]() {
+				[=, this]() {
 					bool currently_writing_msg;
 					{
 						std::scoped_lock l(m_outgoing_msg_queue.m_queue_mux);
@@ -375,26 +375,14 @@ namespace ONET {
 		}
 
 		void Open(uint_least16_t port, const std::optional<std::string>& address = std::nullopt) {
-			m_socket->open(m_endpoint.protocol());
+			m_socket->open(asio::ip::udp::v4());
 			if (address.has_value())
 				m_socket->bind(asio::ip::udp::endpoint{ asio::ip::make_address(address.value()), port });
 			else
 				m_socket->bind(asio::ip::udp::endpoint{ asio::ip::make_address("0.0.0.0"), port });
 
-			asio::socket_base::receive_buffer_size s;
-			m_socket->get_option(s);
-			std::cout << s.value() << "\n";
 			m_socket->set_option(asio::socket_base::receive_buffer_size(5'000'000));
-			m_socket->get_option(s);
-			std::cout << s.value() << "\n";
-
-			asio::socket_base::send_buffer_size s2;
-			m_socket->get_option(s2);
-			std::cout << s2.value() << "\n";
 			m_socket->set_option(asio::socket_base::send_buffer_size(5'000'000));
-			m_socket->get_option(s2);
-			std::cout << s2.value() << "\n";
-
 		}
 
 		void SetEndpoint(const std::string& ipv4, unsigned port) {
@@ -450,7 +438,7 @@ namespace ONET {
 		void ReadMessage() {
 			m_socket->async_receive_from(asio::buffer(
 				&m_temp_receiving_message,
-				sizeof(MessageUDP<MsgHeaderType>)), m_endpoint,
+				sizeof(MessageUDP<MsgHeaderType>)), m_receiving_endpoint,
 				[this](std::error_code ec, std::size_t length) {
 					if (!ec) {
 						m_current_bytes_read += length;
@@ -499,6 +487,8 @@ namespace ONET {
 		std::unique_ptr<asio::ip::udp::socket> m_socket;
 
 		asio::ip::udp::endpoint m_endpoint;
+
+		asio::ip::udp::endpoint m_receiving_endpoint;
 
 		size_t m_current_bytes_read = 0;
 
@@ -562,6 +552,9 @@ namespace ONET {
 		}
 
 		void OpenToConnections(unsigned port) {
+			m_udp_receiver.Open(ONET_UDP_PORT_SERVER);
+			m_udp_receiver.ReadMessage();
+
 			m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(NetworkManager::GetIO(), asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));
 			
 			auto tcp_socket = std::make_shared<SocketConnectionTCP<MsgHeaderType>>(incoming_msg_queue_tcp);
@@ -603,8 +596,8 @@ namespace ONET {
 
 			std::scoped_lock l(connections.GetMutex());
 
-			short endpoint_port = ONET_UDP_PORT_CLIENT;
-			short server_port = ONET_UDP_PORT_SERVER;
+			unsigned endpoint_port = ONET_UDP_PORT_CLIENT;
+			unsigned server_port = ONET_UDP_PORT_SERVER;
 			for (auto& connection : connections.GetVector()) {
 				if (connection.tcp->IsConnected() && connection.tcp->GetRemoteEndpoint().address() == tcp_endpoint.address()) {
 					// This will only happen during multi-client testing on a single machine
@@ -616,9 +609,12 @@ namespace ONET {
 
 			std::shared_ptr<SocketConnectionUDP<MsgHeaderType>> udp_socket = std::make_shared<SocketConnectionUDP<MsgHeaderType>>(incoming_msg_queue_udp);
 			udp_socket->SetEndpoint(address_str, endpoint_port);
+			if (server_port != ONET_UDP_PORT_SERVER) {
+				udp_socket->Open(server_port);
+			}
 
-			udp_socket->Open(server_port);
 			udp_socket->ReadMessage();
+
 			tcp_socket->ReadHeader();
 
 			ServerConnection<MsgHeaderType> connection(tcp_socket, udp_socket, GenConnectionID());
@@ -673,8 +669,8 @@ namespace ONET {
 					vec.erase(vec.begin() + i);
 					i--;
 				}
-
 			}
+
 		}
 
 		tsQueue<MessageTCP<MsgHeaderType>> incoming_msg_queue_tcp;
@@ -682,6 +678,7 @@ namespace ONET {
 
 		tsVector<ServerConnection<MsgHeaderType>> connections;
 	private:
+		SocketConnectionUDP<MsgHeaderType> m_udp_receiver{ incoming_msg_queue_udp };
 
 		uint64_t GenConnectionID() {
 			static uint64_t current_id = 1;

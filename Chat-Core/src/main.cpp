@@ -25,7 +25,7 @@ unsigned g_total_udp_messages = 0;
 void ProcessMessages(Server<ClientServerMessageHeader<GameMessageType>>& net) {
 	size_t size_tcp = net.incoming_msg_queue_tcp.size();
 	if (size_tcp > 0) {
-		auto msg = net.incoming_msg_queue_tcp.pop_back();
+		auto msg = net.incoming_msg_queue_tcp.pop_front();
 
 		// Server sends message to other clients
 		net.BroadcastMessageTCP(msg, msg.header.connection_id);
@@ -69,7 +69,6 @@ int main() {
 			std::cout << g_total_udp_messages << "\n";
 			g_total_udp_messages = 0;
 		}
-
 	}
 
 	ONET::NetworkManager::Shutdown();
