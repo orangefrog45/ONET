@@ -54,7 +54,7 @@ namespace ONET {
 			return m_queue;
 		}
 
-		std::mutex m_queue_mux;
+		std::mutex mux;
 	private:
 		std::deque<T> m_queue;
 	};

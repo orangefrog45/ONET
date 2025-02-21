@@ -47,8 +47,8 @@ namespace ONET {
 			return m_vec;
 		}
 
+		std::mutex mux;
 	private:
-		std::mutex m_vec_mux;
 		std::vector<T> m_vec;
 	};
 }

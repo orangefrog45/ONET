@@ -614,7 +614,6 @@ namespace ONET {
 			}
 
 			udp_socket->ReadMessage();
-
 			tcp_socket->ReadHeader();
 
 			ServerConnection<MsgHeaderType> connection(tcp_socket, udp_socket, GenConnectionID());

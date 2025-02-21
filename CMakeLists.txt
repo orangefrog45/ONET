@@ -1,11 +1,16 @@
 cmake_minimum_required(VERSION 3.8)
-set (CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+project(ONET)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(ONET_COMPILE_EXAMPLE_SERVER_APP)
+add_subdirectory(ONET)
+endif()
 
-project(CHAT_CORE)
-
-add_subdirectory(Chat-Core)
+set(ONET_INCLUDES
+${CMAKE_CURRENT_LIST_DIR}/ONET/headers
+${CMAKE_CURRENT_LIST_DIR}/ONET/extern/asio/asio/include
+${CMAKE_CURRENT_LIST_DIR}/ONET/extern/crc/inc
+CACHE STRING "" FORCE)
